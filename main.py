@@ -3,208 +3,265 @@ from tkinter import filedialog, messagebox
 from PIL import Image, ImageTk
 import image_slicer
 import math
-import os
 
-class AppFatiadorImagens:
+# --- CORREÇÃO CRÍTICA 1: DESATIVAR A TRAVA DE SEGURANÇA ---
+# Isso diz ao Python: "Eu confio nessa imagem, pode carregar mesmo que seja gigante."
+Image.MAX_IMAGE_PIXELS = None 
+
+class AppVisualizadorPro:
     def __init__(self, root):
         self.root = root
-        self.root.title("Slicer Visual Pro - Navegação Avançada")
+        self.root.title("Slicer Visual Scientific - High Performance (LOD)")
         self.root.geometry("1024x768")
+        self.root.configure(bg="#1e1e1e")
 
         # --- Variáveis de Estado ---
         self.caminho_imagem = None
-        self.imagem_original = None     # Imagem Full Resolution (na memória RAM)
-        self.imagem_base_preview = None # Cópia redimensionada para base do zoom
-        self.imagem_exibida = None      # Imagem atualmente no canvas (com zoom aplicado)
-        self.tk_image = None            # Referência para o Garbage Collector do Tkinter
+        self.imagem_original = None     # Imagem GIGANTE (RAW)
+        self.imagem_preview = None      # Imagem LEVE (Thumbnail para zoom out rápido)
+        self.preview_scale = 1.0        # Relação de tamanho entre Original e Preview
+        self.tk_image = None            
         
-        self.scale = 1.0                # Escala atual de visualização
-        self.tamanho_bloco = 1000       # Padrão solicitado: 1000px
-
-        # --- Layout da Interface (GUI) ---
+        # Câmera e Zoom
+        self.zoom_level = 1.0
+        self.camera_x = 0  
+        self.camera_y = 0
         
-        # Frame de Controle (Topo)
-        frame_controle = tk.Frame(root, padx=10, pady=10, bg="#2c3e50") # Cor mais "Pro"
-        frame_controle.pack(fill=tk.X)
+        # Estado do Mouse
+        self.last_mouse_x = 0
+        self.last_mouse_y = 0
 
-        btn_style = {"font": ("Segoe UI", 10), "bg": "#ecf0f1", "relief": "flat"}
+        self.criar_interface()
 
-        btn_abrir = tk.Button(frame_controle, text="📂 Abrir Imagem", command=self.carregar_imagem, **btn_style)
-        btn_abrir.pack(side=tk.LEFT, padx=5)
+    def criar_interface(self):
+        # Barra de Ferramentas
+        frame_topo = tk.Frame(self.root, bg="#2c3e50", height=50)
+        frame_topo.pack(fill=tk.X)
 
-        tk.Label(frame_controle, text="Tamanho do Corte (px):", bg="#2c3e50", fg="white").pack(side=tk.LEFT, padx=5)
-        self.entrada_tamanho = tk.Entry(frame_controle, width=8)
-        self.entrada_tamanho.insert(0, "1000")
-        self.entrada_tamanho.pack(side=tk.LEFT)
+        style_btn = {"bg": "#34495e", "fg": "white", "relief": "flat", "font": ("Arial", 10)}
 
-        btn_grid = tk.Button(frame_controle, text="re-Renderizar Grid", command=self.atualizar_visualizacao, **btn_style)
-        btn_grid.pack(side=tk.LEFT, padx=5)
+        tk.Button(frame_topo, text="📂 Abrir Imagem", command=self.carregar_imagem, **style_btn).pack(side=tk.LEFT, padx=10, pady=10)
+        
+        tk.Label(frame_topo, text="Grid (px):", bg="#2c3e50", fg="white").pack(side=tk.LEFT)
+        self.entry_grid = tk.Entry(frame_topo, width=8, justify="center")
+        self.entry_grid.insert(0, "1000")
+        self.entry_grid.pack(side=tk.LEFT, padx=5)
+        
+        tk.Button(frame_topo, text="🔄 Redesenhar", command=self.redesenhar, **style_btn).pack(side=tk.LEFT, padx=5)
 
-        btn_fatiar = tk.Button(frame_controle, text="✂️ Fatiar e Salvar", command=self.fatiar_imagem, bg="#27ae60", fg="white", font=("Segoe UI", 10, "bold"))
-        btn_fatiar.pack(side=tk.RIGHT, padx=5)
+        tk.Button(frame_topo, text="✂️ FATIAR", command=self.fatiar, bg="#27ae60", fg="white", font=("Arial", 10, "bold")).pack(side=tk.RIGHT, padx=10)
 
-        self.lbl_info = tk.Label(frame_controle, text="Dica: Ctrl+Scroll para Zoom | Clique+Arrastar para Mover", bg="#2c3e50", fg="#bdc3c7", font=("Segoe UI", 9))
-        self.lbl_info.pack(side=tk.LEFT, padx=20)
-
-        # --- Área de Visualização (Canvas) ---
-        self.canvas_frame = tk.Frame(root, bg="#333")
+        # Canvas
+        self.canvas_frame = tk.Frame(self.root, bg="#000")
         self.canvas_frame.pack(fill=tk.BOTH, expand=True)
-
-        # Removemos Scrollbars manuais pois usaremos o Pan (clicar e arrastar)
-        self.canvas = tk.Canvas(self.canvas_frame, bg="#1e1e1e", highlightthickness=0)
+        
+        self.canvas = tk.Canvas(self.canvas_frame, bg="#111", highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
-        # --- Bindings (Eventos de Mouse/Teclado) ---
-        self.canvas.bind("<ButtonPress-1>", self.start_pan) # Clique esquerdo segura
-        self.canvas.bind("<B1-Motion>", self.do_pan)        # Mover mouse arrasta
-        
-        # Zoom no Windows
-        self.canvas.bind("<Control-MouseWheel>", self.do_zoom_windows)
-        # Zoom no Linux (geralmente mapeado para Button-4 e Button-5)
-        self.canvas.bind("<Control-Button-4>", lambda event: self.do_zoom_linux(event, 1))
-        self.canvas.bind("<Control-Button-5>", lambda event: self.do_zoom_linux(event, -1))
+        # Eventos
+        self.canvas.bind("<ButtonPress-1>", self.clique_iniciar)
+        self.canvas.bind("<B1-Motion>", self.clique_arrastar)
+        self.canvas.bind("<MouseWheel>", self.zoom_windows)
+        self.canvas.bind("<Button-4>", lambda e: self.zoom_linux(1))
+        self.canvas.bind("<Button-5>", lambda e: self.zoom_linux(-1))
+        self.canvas.bind("<Configure>", lambda e: self.redesenhar())
 
     def carregar_imagem(self):
-        path = filedialog.askopenfilename(filetypes=[("Imagens", "*.jpg;*.jpeg;*.png;*.tif;*.tiff")])
-        if not path:
-            return
-
+        path = filedialog.askopenfilename(filetypes=[("Imagens", "*.jpg;*.png;*.tif;*.tiff;*.bmp")])
+        if not path: return
+        
         self.caminho_imagem = path
         try:
-            # 1. Carrega original
+            # Carrega a imagem original
             self.imagem_original = Image.open(path)
             w_real, h_real = self.imagem_original.size
-            self.lbl_info.config(text=f"Carregado: {w_real}x{h_real} px - Use Ctrl+Scroll para Zoom")
+            
+            # --- CORREÇÃO 2: CRIAR CACHE DE BAIXA RESOLUÇÃO (LOD) ---
+            # Se a imagem for maior que 2048px, criamos uma cópia pequena para usar no zoom out.
+            # Isso evita processar 1GB de dados quando você quer ver a imagem inteira.
+            max_preview_size = 2048
+            if w_real > max_preview_size or h_real > max_preview_size:
+                ratio = min(max_preview_size / w_real, max_preview_size / h_real)
+                new_w = int(w_real * ratio)
+                new_h = int(h_real * ratio)
+                print(f"Gerando cache de visualização: {new_w}x{new_h}...")
+                self.imagem_preview = self.imagem_original.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                self.preview_scale = w_real / new_w  # Guardamos a proporção para converter coords
+            else:
+                self.imagem_preview = self.imagem_original.copy()
+                self.preview_scale = 1.0
 
-            # 2. Cria uma BASE de visualização. 
-            # Limitamos a base a 2000px para garantir performance inicial, 
-            # mas permitimos zoom a partir dela.
-            base_width = 2000
-            ratio = base_width / float(w_real)
-            base_height = int(float(h_real) * float(ratio))
+            # Ajusta zoom inicial
+            w_tela = self.canvas.winfo_width()
+            h_tela = self.canvas.winfo_height()
             
-            self.imagem_base_preview = self.imagem_original.resize((base_width, base_height), Image.Resampling.LANCZOS)
+            # Zoom inicial para caber na tela
+            self.zoom_level = min(w_tela/w_real, h_tela/h_real)
+            self.camera_x = 0
+            self.camera_y = 0
             
-            # Reset de escala
-            self.scale = 1.0
-            self.atualizar_visualizacao() # Desenha a imagem e o grid
+            self.redesenhar()
+        except Exception as e:
+            messagebox.showerror("Erro", str(e))
+
+    def clique_iniciar(self, event):
+        self.last_mouse_x = event.x
+        self.last_mouse_y = event.y
+
+    def clique_arrastar(self, event):
+        if not self.imagem_original: return
+        dx = event.x - self.last_mouse_x
+        dy = event.y - self.last_mouse_y
+        self.camera_x -= dx / self.zoom_level
+        self.camera_y -= dy / self.zoom_level
+        self.last_mouse_x = event.x
+        self.last_mouse_y = event.y
+        self.redesenhar()
+
+    def zoom_windows(self, event):
+        if event.delta > 0: self.aplicar_zoom(1.2, event.x, event.y)
+        else: self.aplicar_zoom(0.8, event.x, event.y)
+
+    def zoom_linux(self, direction):
+        cx, cy = self.canvas.winfo_width()/2, self.canvas.winfo_height()/2
+        if direction > 0: self.aplicar_zoom(1.2, cx, cy)
+        else: self.aplicar_zoom(0.8, cx, cy)
+
+    def aplicar_zoom(self, fator, mouse_x, mouse_y):
+        if not self.imagem_original: return
+        novo_zoom = self.zoom_level * fator
+        
+        # Limite mínimo: não deixar afastar mais que ver a imagem inteira pequenininha
+        if novo_zoom < 0.001: return 
+
+        world_x = self.camera_x + (mouse_x / self.zoom_level)
+        world_y = self.camera_y + (mouse_y / self.zoom_level)
+        
+        self.zoom_level = novo_zoom
+        
+        self.camera_x = world_x - (mouse_x / self.zoom_level)
+        self.camera_y = world_y - (mouse_y / self.zoom_level)
+        
+        self.redesenhar()
+
+    def redesenhar(self):
+        if not self.imagem_original: return
+        
+        w_canvas = self.canvas.winfo_width()
+        h_canvas = self.canvas.winfo_height()
+        
+        # Coordenadas do Viewport no Mundo Real
+        left = self.camera_x
+        top = self.camera_y
+        right = left + (w_canvas / self.zoom_level)
+        bottom = top + (h_canvas / self.zoom_level)
+
+        # --- LÓGICA HÍBRIDA (LOD - Level of Detail) ---
+        # Se estamos muito afastados (vendo muita área), usamos o Preview (rápido)
+        # Se estamos perto (zoom in), usamos o Original (detalhado)
+        
+        usar_preview = False
+        # Se 1 pixel da tela representa mais que 2 pixels reais, use o preview
+        if self.zoom_level < 0.5 and self.preview_scale > 1.0:
+            usar_preview = True
+        
+        try:
+            if usar_preview:
+                # Converter coordenadas do Mundo Real -> Coordenadas do Preview
+                p_left = int(left / self.preview_scale)
+                p_top = int(top / self.preview_scale)
+                p_right = int(right / self.preview_scale)
+                p_bottom = int(bottom / self.preview_scale)
+                
+                # Crop do cache (muito rápido)
+                region = self.imagem_preview.crop((p_left, p_top, p_right, p_bottom))
+                img_display = region.resize((w_canvas, h_canvas), Image.Resampling.NEAREST)
+                
+            else:
+                # Crop do Original (detalhado, mas mais lento se a área for grande)
+                # Proteção: Clamp coordinates para não sair da imagem
+                w_real, h_real = self.imagem_original.size
+                c_left = max(0, int(left))
+                c_top = max(0, int(top))
+                c_right = min(w_real, int(right))
+                c_bottom = min(h_real, int(bottom))
+                
+                if c_right > c_left and c_bottom > c_top:
+                    region = self.imagem_original.crop((c_left, c_top, c_right, c_bottom))
+                    
+                    # Se o crop for menor que o canvas (bordas), precisamos colar numa imagem preta
+                    final_img = Image.new("RGB", (w_canvas, h_canvas), (17, 17, 17)) # Fundo cinza escuro
+                    
+                    # Calcular onde colar
+                    paste_x = int((c_left - left) * self.zoom_level)
+                    paste_y = int((c_top - top) * self.zoom_level)
+                    paste_w = int((c_right - c_left) * self.zoom_level)
+                    paste_h = int((c_bottom - c_top) * self.zoom_level)
+                    
+                    if paste_w > 0 and paste_h > 0:
+                        region_resized = region.resize((paste_w, paste_h), Image.Resampling.NEAREST)
+                        final_img.paste(region_resized, (paste_x, paste_y))
+                        img_display = final_img
+                    else:
+                        img_display = final_img
+                else:
+                    # Fora da imagem
+                    img_display = Image.new("RGB", (w_canvas, h_canvas), (17, 17, 17))
+
+            self.tk_image = ImageTk.PhotoImage(img_display)
+            self.canvas.delete("all")
+            self.canvas.create_image(0, 0, image=self.tk_image, anchor="nw")
+            
+            # Grid
+            self.desenhar_grid_otimizado(left, top, right, bottom, w_canvas, h_canvas)
 
         except Exception as e:
-            messagebox.showerror("Erro", f"Erro ao carregar: {str(e)}")
+            print(f"Erro render: {e}")
 
-    def start_pan(self, event):
-        """Marca o ponto inicial para arrastar a tela"""
-        self.canvas.scan_mark(event.x, event.y)
-
-    def do_pan(self, event):
-        """Move a tela baseado no movimento do mouse"""
-        self.canvas.scan_dragto(event.x, event.y, gain=1)
-
-    def do_zoom_windows(self, event):
-        """Lógica de zoom para Windows (event.delta)"""
-        # Delta positivo = Scroll Up (Zoom In), Negativo = Scroll Down (Zoom Out)
-        if event.delta > 0:
-            self.zoom(1.1) # Aumenta 10%
-        else:
-            self.zoom(0.9) # Diminui 10%
-
-    def do_zoom_linux(self, event, direction):
-        """Lógica de zoom para Linux"""
-        if direction > 0:
-            self.zoom(1.1)
-        else:
-            self.zoom(0.9)
-
-    def zoom(self, factor):
-        """Aplica o fator de zoom e redesenha"""
-        if not self.imagem_base_preview:
-            return
+    def desenhar_grid_otimizado(self, left, top, right, bottom, w_canvas, h_canvas):
+        try:
+            block_size = int(self.entry_grid.get())
+        except: return
         
-        # Limites de zoom (para não travar ou sumir)
-        novo_scale = self.scale * factor
-        if novo_scale < 0.1 or novo_scale > 10: 
-            return
+        # Limita quantidade de linhas para não travar se der muito zoom out
+        if (right - left) / block_size > 200: 
+            return # Se houver mais de 200 linhas na tela, não desenha o grid (fica poluído)
 
-        self.scale = novo_scale
-        self.atualizar_visualizacao()
-
-    def atualizar_visualizacao(self):
-        """Redesenha imagem e grid baseada na escala atual"""
-        if not self.imagem_base_preview:
-            return
+        start_x = (left // block_size) * block_size
+        if start_x < left: start_x += block_size
+        
+        x = start_x
+        while x < right:
+            screen_x = (x - left) * self.zoom_level
+            self.canvas.create_line(screen_x, 0, screen_x, h_canvas, fill="yellow", dash=(2, 4))
+            x += block_size
             
-        # 1. Calcular novo tamanho da imagem de visualização
-        w_base, h_base = self.imagem_base_preview.size
-        new_w = int(w_base * self.scale)
-        new_h = int(h_base * self.scale)
+        start_y = (top // block_size) * block_size
+        if start_y < top: start_y += block_size
         
-        # 2. Redimensionar (Usamos NEAREST durante zoom para ser rápido)
-        self.imagem_exibida = self.imagem_base_preview.resize((new_w, new_h), Image.Resampling.NEAREST)
-        self.tk_image = ImageTk.PhotoImage(self.imagem_exibida)
+        y = start_y
+        while y < bottom:
+            screen_y = (y - top) * self.zoom_level
+            self.canvas.create_line(0, screen_y, w_canvas, screen_y, fill="yellow", dash=(2, 4))
+            y += block_size
 
-        # 3. Limpar e desenhar Imagem
-        self.canvas.delete("all")
-        # Centralizar a imagem no canvas virtual seria ideal, mas anchor NW funciona bem
-        self.canvas.create_image(0, 0, image=self.tk_image, anchor="nw")
-        
-        # 4. Desenhar Grid
-        self.desenhar_grid_dinamico(new_w, new_h)
-        
-        # 5. Ajustar a área de rolagem do canvas
-        self.canvas.config(scrollregion=self.canvas.bbox("all"))
-
-    def desenhar_grid_dinamico(self, w_view, h_view):
-        """Calcula onde as linhas devem aparecer na visualização atual"""
+    def fatiar(self):
+        if not self.imagem_original: return
         try:
-            tamanho_bloco_real = int(self.entrada_tamanho.get())
-        except ValueError:
-            return
-
-        w_real, h_real = self.imagem_original.size
-        
-        # A matemática mágica: Relação entre o Pixel Real e o Pixel na Tela
-        # Ratio = Tamanho Atual na Tela / Tamanho Original Real
-        ratio_x = w_view / w_real
-        ratio_y = h_view / h_real
-
-        # Desenhar linhas Verticais
-        # Step é o tamanho do bloco ajustado para a tela
-        step_x = tamanho_bloco_real * ratio_x
-        step_y = tamanho_bloco_real * ratio_y
-
-        # Loop otimizado: desenhamos apenas as linhas necessárias
-        # Linhas Verticais
-        x = step_x
-        while x < w_view:
-            self.canvas.create_line(x, 0, x, h_view, fill="#FFFF00", width=1, dash=(4, 4))
-            x += step_x
-
-        # Linhas Horizontais
-        y = step_y
-        while y < h_view:
-            self.canvas.create_line(0, y, w_view, y, fill="#FFFF00", width=1, dash=(4, 4))
-            y += step_y
-
-    def fatiar_imagem(self):
-        """Lógica de fatiamento (Mantida idêntica, pois opera no arquivo original)"""
-        if not self.caminho_imagem: return
-        try:
-            tamanho_bloco = int(self.entrada_tamanho.get())
-            w_real, h_real = self.imagem_original.size
-            colunas = math.ceil(w_real / tamanho_bloco)
-            linhas = math.ceil(h_real / tamanho_bloco)
-            total_fatias = colunas * linhas
-
-            if messagebox.askyesno("Confirmar", f"Gerar {total_fatias} fatias de aprox. {tamanho_bloco}px?"):
-                output_dir = filedialog.askdirectory()
-                if output_dir:
-                    tiles = image_slicer.slice(self.caminho_imagem, total_fatias)
-                    image_slicer.save_tiles(tiles, directory=output_dir, prefix='slice', format='png')
-                    messagebox.showinfo("Sucesso", "Fatiamento concluído!")
+            tamanho = int(self.entry_grid.get())
+            w, h = self.imagem_original.size
+            total = math.ceil(w/tamanho) * math.ceil(h/tamanho)
+            
+            if messagebox.askyesno("Processar", f"Isso vai gerar {total} arquivos. Continuar?"):
+                folder = filedialog.askdirectory()
+                if folder:
+                    tiles = image_slicer.slice(self.caminho_imagem, total)
+                    image_slicer.save_tiles(tiles, directory=folder, prefix='corte', format='png')
+                    messagebox.showinfo("Fim", "Imagens salvas!")
         except Exception as e:
             messagebox.showerror("Erro", str(e))
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = AppFatiadorImagens(root)
+    app = AppVisualizadorPro(root)
     root.mainloop()
